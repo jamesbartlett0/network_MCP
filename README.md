@@ -95,3 +95,7 @@ uv run {server}.py
 **XGS**
 API information: https://docs.sophos.com/nsg/sophos-firewall/{OSVersion}/api/apicontentpage.html
 - Allow API Backup & firmware > API
+
+## FortiGate
+**7.4**
+https://fndn.fortinet.net
