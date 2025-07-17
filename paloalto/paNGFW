@@ -1,0 +1,740 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import requests
+import xml.etree.ElementTree as ET
+from typing import Any, Dict, Optional
+from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+from urllib3.exceptions import InsecureRequestWarning
+from urllib.parse import urlencode
+
+# Suppress SSL warnings for self-signed certificates
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+# Initialize FastMCP server
+mcp = FastMCP("Palo Alto NGFW")
+
+# Load environment variables
+load_dotenv()
+
+class PaloAltoAPI:
+    """Palo Alto NGFW XML API client."""
+    
+    def __init__(self):
+        self._debug = False
+        self._http_debug = False
+        self._session = requests.Session()
+        self._api_key = None
+        self._base_url = None
+        self._timeout = 30
+
+    def dprint(self, response):
+        """Debug print for API requests/responses."""
+        if self._debug:
+            method = response.request.method
+            url = response.request.url
+            body = response.request.body
+
+            print(f"\nREQUEST:\n{method}: {url}", file=sys.stderr)
+            
+            if self._http_debug:
+                headers = response.request.headers
+                for key, value in headers.items():
+                    print(f"{key}: {value}", file=sys.stderr)
+
+            if body is not None:
+                print(f"\nRequest Body:\n{body}", file=sys.stderr)
+
+            print(f"\nRESPONSE:\n{response.status_code} {response.reason}", file=sys.stderr)
+            
+            if self._http_debug:
+                headers = response.headers
+                for key, value in headers.items():
+                    print(f"{key}: {value}", file=sys.stderr)
+
+            if response.content:
+                print(f"\nResponse Content:\n{response.content.decode()}", file=sys.stderr)
+
+    def debug(self, status):
+        """Enable/disable debug logging."""
+        self._debug = (status == 'on')
+
+    def http_debug(self, status):
+        """Enable/disable HTTP debug logging."""
+        self._http_debug = (status == 'on')
+
+    def set_connection(self, host, port=443, timeout=30):
+        """Set connection parameters."""
+        self._base_url = f"https://{host}:{port}/api/"
+        self._session.verify = False
+        self._timeout = timeout
+
+    def authenticate_with_credentials(self, username, password):
+        """Authenticate and get API key using username/password."""
+        if not self._base_url:
+            raise ValueError("Connection not configured. Call set_connection() first.")
+        
+        params = {
+            'type': 'keygen',
+            'user': username,
+            'password': password
+        }
+        
+        url = self._base_url
+        response = self._session.get(url, params=params, timeout=self._timeout)
+        self.dprint(response)
+        
+        if response.status_code == 200:
+            try:
+                root = ET.fromstring(response.content)
+                if root.attrib.get('status') == 'success':
+                    key_element = root.find('.//key')
+                    if key_element is not None:
+                        self._api_key = key_element.text
+                        return True, "Authentication successful"
+                    else:
+                        return False, "API key not found in response"
+                else:
+                    error_msg = "Authentication failed"
+                    msg_element = root.find('.//msg')
+                    if msg_element is not None:
+                        error_msg += f": {msg_element.text}"
+                    return False, error_msg
+            except ET.ParseError as e:
+                return False, f"Failed to parse response: {str(e)}"
+        
+        return False, f"HTTP {response.status_code}: {response.reason}"
+
+    def set_api_key(self, api_key):
+        """Set API key directly."""
+        self._api_key = api_key
+
+    def make_request(self, params):
+        """Make authenticated API request."""
+        if not self._api_key:
+            raise ValueError("Not authenticated. Call authenticate_with_credentials() or set_api_key() first.")
+        
+        if not self._base_url:
+            raise ValueError("Connection not configured. Call set_connection() first.")
+        
+        # Add API key to parameters
+        params['key'] = self._api_key
+        
+        url = self._base_url
+        response = self._session.get(url, params=params, timeout=self._timeout)
+        self.dprint(response)
+        
+        return response
+
+    def get_config(self, xpath=None):
+        """Get configuration."""
+        params = {
+            'type': 'config',
+            'action': 'get'
+        }
+        if xpath:
+            params['xpath'] = xpath
+        
+        return self.make_request(params)
+
+    def set_config(self, xpath, element):
+        """Set configuration."""
+        params = {
+            'type': 'config',
+            'action': 'set',
+            'xpath': xpath,
+            'element': element
+        }
+        
+        return self.make_request(params)
+
+    def edit_config(self, xpath, element):
+        """Edit configuration."""
+        params = {
+            'type': 'config',
+            'action': 'edit',
+            'xpath': xpath,
+            'element': element
+        }
+        
+        return self.make_request(params)
+
+    def delete_config(self, xpath):
+        """Delete configuration."""
+        params = {
+            'type': 'config',
+            'action': 'delete',
+            'xpath': xpath
+        }
+        
+        return self.make_request(params)
+
+    def run_op_command(self, cmd):
+        """Run operational command."""
+        params = {
+            'type': 'op',
+            'cmd': cmd
+        }
+        
+        return self.make_request(params)
+
+    def commit(self):
+        """Commit configuration changes."""
+        params = {
+            'type': 'commit',
+            'cmd': '<commit></commit>'
+        }
+        
+        return self.make_request(params)
+
+
+# Configuration from environment variables
+def load_config() -> Dict[str, str]:
+    """Load configuration from environment variables."""
+    config = {
+        'host': os.getenv('PALO_ALTO_HOST', ''),
+        'port': os.getenv('PALO_ALTO_PORT', '443'),
+        'username': os.getenv('PALO_ALTO_USERNAME', 'admin'),
+        'password': os.getenv('PALO_ALTO_PASSWORD', ''),
+        'api_key': os.getenv('PALO_ALTO_API_KEY', ''),
+        'timeout': int(os.getenv('PALO_ALTO_TIMEOUT', '30'))
+    }
+    
+    print("Palo Alto NGFW Configuration loaded:", file=sys.stderr)
+    print(f"  Host: {config['host']}:{config['port']}", file=sys.stderr)
+    print(f"  Username: {config['username']}", file=sys.stderr)
+    print(f"  Password: {'Set' if config['password'] else 'NOT SET'}", file=sys.stderr)
+    print(f"  API Key: {'Set' if config['api_key'] else 'NOT SET'}", file=sys.stderr)
+    print(f"  Timeout: {config['timeout']}s", file=sys.stderr)
+    
+    return config
+
+# Load configuration
+CONFIG = load_config()
+
+# Global Palo Alto client instance
+palo_alto = PaloAltoAPI()
+
+# Global state
+session_data = {
+    'authenticated': False,
+    'auth_method': None,
+    'connection_status': 'Not tested',
+    'host': f"{CONFIG['host']}:{CONFIG['port']}"
+}
+
+def parse_xml_response(response: requests.Response) -> Dict[str, Any]:
+    """Parse XML API response."""
+    try:
+        if response.content:
+            root = ET.fromstring(response.content)
+            
+            # Convert XML to a more readable format
+            result = {
+                'status': root.attrib.get('status', 'unknown'),
+                'success': root.attrib.get('status') == 'success'
+            }
+            
+            # Extract result data
+            result_element = root.find('result')
+            if result_element is not None:
+                # Convert XML element to dict representation
+                result['data'] = xml_to_dict(result_element)
+            
+            # Extract messages
+            msg_element = root.find('.//msg')
+            if msg_element is not None:
+                result['message'] = msg_element.text
+            
+            return result
+        else:
+            return {'status': 'empty', 'success': False, 'data': None}
+            
+    except ET.ParseError as e:
+        return {
+            'status': 'parse_error',
+            'success': False,
+            'error': f"XML parse error: {str(e)}",
+            'raw_content': response.content.decode() if response.content else ''
+        }
+
+def xml_to_dict(element):
+    """Convert XML element to dictionary."""
+    result = {}
+    
+    # Add attributes
+    if element.attrib:
+        result['@attributes'] = element.attrib
+    
+    # Add text content
+    if element.text and element.text.strip():
+        if len(element) == 0:  # No children, just text
+            return element.text.strip()
+        else:
+            result['text'] = element.text.strip()
+    
+    # Add children
+    for child in element:
+        child_data = xml_to_dict(child)
+        if child.tag in result:
+            # Multiple elements with same tag - convert to list
+            if not isinstance(result[child.tag], list):
+                result[child.tag] = [result[child.tag]]
+            result[child.tag].append(child_data)
+        else:
+            result[child.tag] = child_data
+    
+    return result if result else None
+
+def format_response(response: requests.Response) -> Dict[str, Any]:
+    """Format API response for display."""
+    parsed = parse_xml_response(response)
+    
+    return {
+        'status_code': response.status_code,
+        'http_success': response.status_code < 400,
+        'api_success': parsed.get('success', False),
+        'api_status': parsed.get('status', 'unknown'),
+        'data': parsed.get('data'),
+        'message': parsed.get('message'),
+        'error': parsed.get('error'),
+        'url': response.url,
+        'raw_xml': response.content.decode() if response.content else ''
+    }
+
+def format_output(response_data: Dict[str, Any], title: str = "API Response") -> str:
+    """Format response data for user display."""
+    status_icon = "✅" if response_data['api_success'] else "❌"
+    
+    result = f"{status_icon} {title}\n"
+    result += f"HTTP Status: {response_data['status_code']}\n"
+    result += f"API Status: {response_data['api_status']}\n"
+    result += f"URL: {response_data['url']}\n"
+    
+    if response_data.get('message'):
+        result += f"Message: {response_data['message']}\n"
+    
+    if response_data.get('error'):
+        result += f"Error: {response_data['error']}\n"
+    
+    result += "\n"
+    
+    if response_data.get('data'):
+        result += "Response Data:\n"
+        result += json.dumps(response_data['data'], indent=2)
+    elif response_data.get('raw_xml'):
+        result += "Raw XML Response:\n"
+        result += response_data['raw_xml']
+    
+    return result
+
+@mcp.tool()
+async def test_connection() -> str:
+    """Test basic connectivity to the Palo Alto NGFW."""
+    if not CONFIG['host']:
+        return "❌ No host configured. Set PALO_ALTO_HOST environment variable."
+    
+    try:
+        host = CONFIG['host']
+        port = CONFIG['port']
+        
+        # Test multiple endpoints
+        test_urls = [
+            f"https://{host}:{port}/api/",
+            f"https://{host}:{port}/",  # Web interface
+            f"https://{host}:{port}/php/login.php"  # Login page
+        ]
+        
+        results = []
+        for url in test_urls:
+            try:
+                response = requests.get(url, verify=False, timeout=10)
+                results.append(f"✅ {url} - HTTP {response.status_code}")
+            except requests.ConnectionError:
+                results.append(f"❌ {url} - Connection refused")
+            except requests.Timeout:
+                results.append(f"⏱️ {url} - Timeout")
+            except Exception as e:
+                results.append(f"⚠️ {url} - {str(e)}")
+        
+        if any("✅" in result for result in results):
+            session_data['connection_status'] = "✅ Reachable"
+            return f"""
+🔗 Connection Test Results:
+Host: {CONFIG['host']}:{CONFIG['port']}
+
+Results:
+""" + "\n".join(f"   {result}" for result in results) + """
+
+✅ Palo Alto NGFW is reachable. Try authentication next.
+"""
+        else:
+            session_data['connection_status'] = "❌ All endpoints failed"
+            return f"""
+🔗 Connection Test Results:
+❌ Palo Alto Host: {CONFIG['host']}
+❌ Port: {CONFIG['port']}
+
+All test endpoints failed:
+""" + "\n".join(f"   {result}" for result in results) + """
+
+Troubleshooting:
+1. Verify the IP address/hostname is correct
+2. Check if the firewall is powered on and accessible
+3. Ensure network connectivity
+4. Verify HTTPS management access is enabled
+5. Check management interface configuration
+6. Verify your IP is allowed in management access rules
+"""
+            
+    except Exception as e:
+        session_data['connection_status'] = f"❌ Error: {str(e)}"
+        return f"❌ Connection test failed: {str(e)}"
+
+@mcp.tool()
+async def get_status() -> str:
+    """Get current connection and authentication status."""
+    auth_status = "✅ Authenticated" if session_data['authenticated'] else "❌ Not authenticated"
+    password_status = "✅ Set" if CONFIG['password'] else "❌ Not set"
+    api_key_status = "✅ Set" if CONFIG['api_key'] else "❌ Not set"
+    
+    return f"""
+📊 Palo Alto NGFW Status
+🔗 Connection:
+   • Host: {CONFIG['host']}:{CONFIG['port']}
+   • Status: {session_data['connection_status']}
+   • Timeout: {CONFIG['timeout']}s
+
+🔐 Authentication:
+   • Username: {CONFIG['username']}
+   • Password: {password_status}
+   • API Key: {api_key_status}
+   • Status: {auth_status}
+   • Method: {session_data['auth_method'] or 'None'}
+
+⚙️ Environment Variables:
+   Set these in your .env file:
+   • PALO_ALTO_HOST={CONFIG['host']}
+   • PALO_ALTO_PORT={CONFIG['port']}
+   • PALO_ALTO_USERNAME={CONFIG['username']}
+   • PALO_ALTO_PASSWORD={'***' if CONFIG['password'] else 'NOT SET'}
+   • PALO_ALTO_API_KEY={'***' if CONFIG['api_key'] else 'NOT SET'}
+   • PALO_ALTO_TIMEOUT={CONFIG['timeout']}
+
+💡 Quick Start:
+   1. test_connection() - Test connectivity
+   2. authenticate() - Log in (uses API key if available, otherwise username/password)
+   3. Use other tools once authenticated
+
+📚 Common Operations:
+   • get_system_info() - Get system information
+   • get_security_policies() - List security rules
+   • get_address_objects() - List address objects
+   • get_interfaces() - List network interfaces
+"""
+
+@mcp.tool()
+async def authenticate() -> str:
+    """Authenticate with the Palo Alto NGFW."""
+    host = CONFIG['host']
+    port = CONFIG['port']
+    
+    # Configure connection
+    palo_alto.set_connection(host, int(port), CONFIG['timeout'])
+    
+    # Try API key authentication first if available
+    if CONFIG['api_key']:
+        try:
+            palo_alto.set_api_key(CONFIG['api_key'])
+            
+            # Test the authentication with a simple request
+            response = palo_alto.run_op_command('<show><system><info></info></system></show>')
+            response_data = format_response(response)
+            
+            if response_data['api_success']:
+                session_data['authenticated'] = True
+                session_data['auth_method'] = 'API Key'
+                session_data['connection_status'] = "✅ Authenticated via API Key"
+                
+                return f"""
+🔐 Authentication Results:
+✅ Successfully authenticated using API Key
+🔑 Method: API Key
+🌐 Connection: {session_data['connection_status']}
+
+{format_output(response_data, "Authentication Test")}
+"""
+            else:
+                session_data['authenticated'] = False
+                return f"""
+🔐 API Key Authentication Failed:
+❌ API key authentication failed
+{format_output(response_data, "Authentication Error")}
+
+Try regenerating your API key or use username/password authentication.
+"""
+                
+        except Exception as e:
+            return f"❌ API Key authentication failed: {str(e)}"
+    
+    # Fall back to username/password authentication
+    elif CONFIG['password']:
+        try:
+            success, message = palo_alto.authenticate_with_credentials(
+                CONFIG['username'], CONFIG['password']
+            )
+            
+            if success:
+                session_data['authenticated'] = True
+                session_data['auth_method'] = 'Username/Password'
+                session_data['connection_status'] = "✅ Authenticated via Username/Password"
+                
+                return f"""
+🔐 Authentication Results:
+✅ Successfully authenticated as {CONFIG['username']}
+🔑 Method: Username/Password  
+🔑 Generated API Key: {palo_alto._api_key[:20]}...
+🌐 Connection: {session_data['connection_status']}
+
+💡 Tip: Save this API key to PALO_ALTO_API_KEY for future use
+"""
+            else:
+                session_data['authenticated'] = False
+                return f"""
+🔐 Authentication Failed:
+❌ Could not authenticate as {CONFIG['username']}
+❌ Error: {message}
+
+Troubleshooting:
+1. Verify username and password are correct
+2. Check if account is enabled and not locked
+3. Ensure your IP is allowed in management access settings
+4. Verify admin privileges are sufficient
+"""
+                
+        except Exception as e:
+            session_data['authenticated'] = False
+            return f"❌ Username/Password authentication failed: {str(e)}"
+    
+    else:
+        return """
+❌ No authentication credentials configured.
+Set either:
+• PALO_ALTO_API_KEY environment variable (recommended), or
+• PALO_ALTO_PASSWORD environment variable for username/password auth
+
+To generate an API key:
+1. Log into the web interface
+2. Go to Device > Setup > Management > Authentication Settings  
+3. Click "Generate API Key"
+4. Or use username/password first, then save the generated key
+"""
+
+@mcp.tool()
+async def get_system_info() -> str:
+    """Get Palo Alto system information."""
+    if not session_data['authenticated']:
+        return "❌ Not authenticated. Run authenticate() first."
+    
+    try:
+        response = palo_alto.run_op_command('<show><system><info></info></system></show>')
+        response_data = format_response(response)
+        
+        return format_output(response_data, "System Information")
+        
+    except Exception as e:
+        return f"❌ Failed to get system info: {str(e)}"
+
+@mcp.tool()
+async def get_config_xpath(xpath: str) -> str:
+    """Get configuration using XPath.
+    
+    Args:
+        xpath: XPath to the configuration element (e.g., "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security")
+    """
+    if not session_data['authenticated']:
+        return "❌ Not authenticated. Run authenticate() first."
+    
+    try:
+        response = palo_alto.get_config(xpath)
+        response_data = format_response(response)
+        
+        return format_output(response_data, f"Configuration: {xpath}")
+        
+    except Exception as e:
+        return f"❌ Failed to get configuration: {str(e)}"
+
+@mcp.tool()
+async def set_config_xpath(xpath: str, element: str) -> str:
+    """Set configuration using XPath.
+    
+    Args:
+        xpath: XPath to set the configuration 
+        element: XML element to set
+    """
+    if not session_data['authenticated']:
+        return "❌ Not authenticated. Run authenticate() first."
+    
+    try:
+        response = palo_alto.set_config(xpath, element)
+        response_data = format_response(response)
+        
+        return format_output(response_data, f"Set Configuration: {xpath}")
+        
+    except Exception as e:
+        return f"❌ Failed to set configuration: {str(e)}"
+
+@mcp.tool()
+async def run_operational_command(cmd: str) -> str:
+    """Run operational command.
+    
+    Args:
+        cmd: XML operational command (e.g., '<show><system><info></info></system></show>')
+    """
+    if not session_data['authenticated']:
+        return "❌ Not authenticated. Run authenticate() first."
+    
+    try:
+        response = palo_alto.run_op_command(cmd)
+        response_data = format_response(response)
+        
+        return format_output(response_data, f"Operational Command")
+        
+    except Exception as e:
+        return f"❌ Failed to run command: {str(e)}"
+
+@mcp.tool()
+async def get_security_policies() -> str:
+    """Get all security policies."""
+    return await get_config_xpath("/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security")
+
+@mcp.tool()
+async def get_address_objects() -> str:
+    """Get all address objects."""
+    return await get_config_xpath("/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address")
+
+@mcp.tool()
+async def get_service_objects() -> str:
+    """Get all service objects."""
+    return await get_config_xpath("/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/service")
+
+@mcp.tool()
+async def get_interfaces() -> str:
+    """Get network interface configuration."""
+    return await get_config_xpath("/config/devices/entry[@name='localhost.localdomain']/network/interface")
+
+@mcp.tool()
+async def get_routing_table() -> str:
+    """Get routing table."""
+    return await run_operational_command('<show><routing><route></route></routing></show>')
+
+@mcp.tool()
+async def get_sessions() -> str:
+    """Get current sessions."""
+    return await run_operational_command('<show><session><all></all></session></show>')
+
+@mcp.tool()
+async def get_threats() -> str:
+    """Get threat information."""
+    return await run_operational_command('<show><log><threat><last>100</last></threat></log></show>')
+
+@mcp.tool()
+async def commit_config() -> str:
+    """Commit configuration changes."""
+    if not session_data['authenticated']:
+        return "❌ Not authenticated. Run authenticate() first."
+    
+    try:
+        response = palo_alto.commit()
+        response_data = format_response(response)
+        
+        return format_output(response_data, "Commit Configuration")
+        
+    except Exception as e:
+        return f"❌ Failed to commit: {str(e)}"
+
+@mcp.tool()
+async def update_credentials(host: str = None, port: str = None, 
+                           username: str = None, password: str = None, 
+                           api_key: str = None, timeout: int = None) -> str:
+    """Update connection credentials at runtime.
+    
+    Args:
+        host: New Palo Alto host/IP
+        port: New port (default 443)
+        username: New username
+        password: New password
+        api_key: New API key
+        timeout: New timeout value
+    """
+    global CONFIG
+    
+    changes = []
+    if host:
+        CONFIG['host'] = host
+        changes.append(f"Host: {host}")
+    if port:
+        CONFIG['port'] = port
+        changes.append(f"Port: {port}")
+    if username:
+        CONFIG['username'] = username
+        changes.append(f"Username: {username}")
+    if password:
+        CONFIG['password'] = password
+        changes.append("Password: Updated")
+    if api_key:
+        CONFIG['api_key'] = api_key
+        changes.append("API Key: Updated")
+    if timeout:
+        CONFIG['timeout'] = timeout
+        changes.append(f"Timeout: {timeout}s")
+    
+    # Reset auth status
+    session_data['authenticated'] = False
+    session_data['auth_method'] = None
+    session_data['connection_status'] = "Credentials updated - not tested"
+    session_data['host'] = f"{CONFIG['host']}:{CONFIG['port']}"
+    
+    if changes:
+        return "✅ Updated:\n" + "\n".join(f"   • {change}" for change in changes) + "\n\n⚠️ Run authenticate() to log in with new credentials"
+    else:
+        return "No changes made - no parameters provided"
+
+@mcp.tool()
+async def enable_debug(http_debug: bool = False) -> str:
+    """Enable debug logging for API requests.
+    
+    Args:
+        http_debug: Enable detailed HTTP debug logging
+    """
+    palo_alto.debug('on')
+    if http_debug:
+        palo_alto.http_debug('on')
+    
+    debug_status = "✅ Debug logging enabled"
+    if http_debug:
+        debug_status += " (including HTTP details)"
+    
+    return debug_status
+
+@mcp.tool()
+async def disable_debug() -> str:
+    """Disable debug logging for API requests."""
+    palo_alto.debug('off')
+    palo_alto.http_debug('off')
+    
+    return "✅ Debug logging disabled"
+
+if __name__ == "__main__":
+    print("🚀 Starting Palo Alto NGFW MCP Server...", file=sys.stderr)
+    print(f"📡 Host: {CONFIG['host']}:{CONFIG['port']}", file=sys.stderr)
+    print(f"👤 Username: {CONFIG['username']}", file=sys.stderr)
+    print(f"🔑 Password: {'Configured' if CONFIG['password'] else 'NOT SET'}", file=sys.stderr)
+    print(f"🎫 API Key: {'Configured' if CONFIG['api_key'] else 'NOT SET'}", file=sys.stderr)
+    print(f"⏱️  Timeout: {CONFIG['timeout']}s", file=sys.stderr)
+    print("", file=sys.stderr)
+    
+    mcp.run(transport='stdio')
