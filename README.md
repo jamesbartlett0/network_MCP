@@ -65,37 +65,11 @@ uv run {server}.py
       "command": "uv",
       "args": [
         "--directory",
-        "/ABSOLUTE/PATH/TO/PARENT/FOLDER/weather",
+        "/ABSOLUTE/PATH/TO/PARENT/FOLDER",
         "run",
-        "weather.py"
+        "{server}.py"
       ]
     }
   }
 }
 ```
-
-
-```json
-{
-  "mcpServers": {
-    "{Server}": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\ABSOLUTE\\PATH\\TO\\PARENT\\FOLDER\\weather",
-        "run",
-        "weather.py"
-      ]
-    }
-  }
-}
-```
-
-## Sophos
-**XGS**
-API information: https://docs.sophos.com/nsg/sophos-firewall/{OSVersion}/api/apicontentpage.html
-- Allow API Backup & firmware > API
-
-## FortiGate
-**7.4**
-https://fndn.fortinet.net
